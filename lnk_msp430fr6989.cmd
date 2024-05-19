@@ -186,8 +186,8 @@ SECTIONS
         .jtagpassword  : {}                 /* JTAG Password                     */
     } > IPESIGNATURE
 
-    .bss        : {} > RAM | FRAM | FRAM2         /* Global & static vars              */
-    .data       : {} > RAM | FRAM | FRAM2         /* Global & static vars              */
+    .bss        : {} > RAM         /* Global & static vars              */
+    .data       : {} > RAM         /* Global & static vars              */
     .TI.noinit  : {} > RAM                  /* For #pragma noinit                */
     .stack      : {} > RAM (HIGH)           /* Software system stack             */
     .tinyram    : {} > TINYRAM              /* Tiny RAM                          */

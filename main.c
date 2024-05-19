@@ -63,11 +63,11 @@ struct target_bsl_command_message {
 //#pragma RETAIN(pc_command_buffer)
 struct PC_Command pc_command_buffer;
 
-volatile uint8_t target_tx_buffer[8192] = {0};
-volatile uint8_t target_rx_buffer[256] = {0};
+volatile uint8_t target_tx_buffer[260] = {0};
+volatile uint8_t target_rx_buffer[260] = {0};
 
-volatile uint8_t pc_tx_buffer[256] = {0};
-volatile uint8_t pc_rx_buffer[8192] = {0};
+volatile uint8_t pc_tx_buffer[260] = {0};
+volatile uint8_t pc_rx_buffer[260] = {0};
 
 volatile uint16_t target_tx_buffer_pos = 0;
 volatile uint16_t target_rx_buffer_pos = 0;
@@ -180,23 +180,21 @@ void activate_bsl()
     // to activate the BSL, the test pin needs two high clock edges
     // they must last
     P8OUT |= BIT5;
-    __delay_cycles(4000); // wait ~250 uS before setting the pin low, then high again.
+    __delay_cycles(16000);
 
-    // drop TST pin low for 250 uS.
     P8OUT &= ~BIT5;
-    __delay_cycles(4000);
+    __delay_cycles(16000);
 
-    // raise TST pin high again
-    P8OUT |= ~BIT5;
-    __delay_cycles(2000); // only need 125 uS
+    P8OUT |= BIT5;
+    __delay_cycles(8000);
 
-    // raise RST pin
     P8OUT |= BIT4;
-    __delay_cycles(4000); // wait 250 uS
+    __delay_cycles(8000);
 
-    // lower TST pin and MCU should BSL should start
     P8OUT &= ~BIT5;
+    __delay_cycles(16000);
 
+    P8OUT &= ~BIT4;
 }
 
 void send_target_cmd(struct target_bsl_command_message* msg)
@@ -210,27 +208,28 @@ void send_target_cmd(struct target_bsl_command_message* msg)
     target_tx_buffer[2] = (msg->data_length + 1) >> 8;
     target_tx_buffer[3] = msg->cmd & 0xFF;
 
-    CRCINIRES = 0xFFFF; // calculate the CRC 16 while we do this
-    // the CKL and CKH are calculated only from the command and associated data, not the header.
-    // this is not well documented, I discovered this by reading/running the python code posted
-    // at this thread here: https://e2e.ti.com/support/microcontrollers/msp-low-power-microcontrollers-group/msp430/f/msp-low-power-microcontroller-forum/437559/calculating-msp430-bsl-checksum
-    // Credit to Jason Gramse for his algorithm.
-    CRCDIRB = msg->cmd;
-    __no_operation();
     uint16_t i = 0;
     for (i = 0; i < msg->data_length; i++)
     {
         target_tx_buffer[i + 4] = msg->data[i];
-        CRCDIRB = msg->data[i];
+    }
+
+    CRCRESR = 0xFFFF; // calculate the CRC 16 and append the values to the end of the data.
+    // the CKL and CKH are calculated only from the command and associated data, not the header.
+    // this is not well documented, I discovered this by reading/running the python code posted
+    // at this thread here: https://e2e.ti.com/support/microcontrollers/msp-low-power-microcontrollers-group/msp430/f/msp-low-power-microcontroller-forum/437559/calculating-msp430-bsl-checksum
+    // Credit to Jason Gramse for his algorithm.
+    for (i = 0; i < msg->data_length + 1; i++)
+    {
+        CRCDIRB_L = target_tx_buffer[i + 3];
         __no_operation();
     }
 
-    uint16_t crc16 = CRCINIRES;
-    target_tx_buffer[4+msg->data_length] = crc16 & 0xFF; // CKL
-    target_tx_buffer[5+msg->data_length] = crc16 >> 8; // CKH
+    target_tx_buffer[4+msg->data_length] = CRCINIRES_L; // CKL
+    target_tx_buffer[5+msg->data_length] = CRCINIRES_H; // CKH
 
     target_tx_buffer_pos = 1;
-    target_tx_buffer_len = 4 + msg->data_length;
+    target_tx_buffer_len = 4 + msg->data_length + 2;
     UCA1TXBUF = target_tx_buffer[0]; // TODO update to go to target and not here.
 
     while (target_tx_buffer_pos != 0);
@@ -245,7 +244,7 @@ void main(void) {
 
     init_led_pins(); // setup Tx/Rx pins
 
-    //init_rst_and_tst_pins(); // setup pins connected to target RST/TST
+    init_rst_and_tst_pins(); // setup pins connected to target RST/TST
 
     PM5CTL0 &= ~LOCKLPM5;                   // Disable the GPIO power-on default high-impedance mode
                                             // to activate previously configured port settings
@@ -259,6 +258,12 @@ void main(void) {
     __bis_SR_register(GIE);
 
     send_target_cmd(&cmd);
+
+    while(1)
+    {
+        activate_bsl();
+        __delay_cycles(8000000);
+    }
 
     __bis_SR_register(LPM3_bits | GIE);       // Enter LPM3, interrupts enabled
     __no_operation();
