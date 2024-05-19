@@ -26,6 +26,8 @@
 
 #include <stdint.h>
 
+typedef uint8_t pc_command_t;
+
 enum COMMAND {
     NO_OP = 0x0,
     CLEAR_TARGET = 0x1,
@@ -33,19 +35,69 @@ enum COMMAND {
 };
 
 struct PC_Command {
-    COMMAND command_type;
+    pc_command_t command_type;
     int16_t length; // command length
     uint32_t crc32; // CRC32 of command, including this header and underlying data
 };
 
+typedef uint8_t bsl_command_t;
+
+enum TARGET_BSL_COMMAND {
+    RX_DATA_BLOCK = 0x10,
+    RX_PASSWORD = 0x11,
+    MASS_ERASE = 0x15,
+    CRC_CHECK = 0x16,
+    LOAD_PC = 0x17,
+    TX_DATA_BLOCK = 0x18,
+    TX_BSL_VERSION = 0x19,
+    RX_DATA_BLOCK_FAST = 0x1B,
+    CHANGE_BAUD_RATE = 0x52
+};
+
+struct target_bsl_command_message {
+    bsl_command_t cmd;
+    uint16_t data_length;
+    uint8_t* data;
+};
+
 //#pragma RETAIN(pc_command_buffer)
-PC_Command pc_command_buffer;
+struct PC_Command pc_command_buffer;
 
-#pragma RETAIN(flashing_buffer)
-volatile uint8_t flashing_buffer[32768] = {0};
+#pragma RETAIN(target_tx_buffer)
+volatile uint8_t target_tx_buffer[8192] = {0};
 
-#pragma RETAIN(flashing_buffer_pos)
-volatile uint32_t flashing_buffer_pos = 0;
+#pragma RETAIN(target_rx_buffer)
+volatile uint8_t target_rx_buffer[256] = {0};
+
+#pragma RETAIN(pc_tx_buffer)
+volatile uint8_t pc_tx_buffer[256] = {0};
+
+#pragma RETAIN(pc_rx_buffer)
+volatile uint8_t pc_rx_buffer[8192] = {0};
+
+#pragma RETAIN(target_tx_buffer_pos)
+volatile uint16_t target_tx_buffer_pos = 0;
+
+#pragma RETAIN(target_tx_buffer_len)
+volatile uint16_t target_tx_buffer_len = 0;
+
+#pragma RETAIN(target_tx_buffer_len)
+volatile uint16_t target_rx_buffer_len = 0;
+
+#pragma RETAIN(target_tx_buffer_len)
+volatile uint16_t pc_tx_buffer_len = 0;
+
+#pragma RETAIN(target_tx_buffer_len)
+volatile uint16_t pc_rx_buffer_len = 0;
+
+#pragma RETAIN(target_rx_buffer_pos)
+volatile uint16_t target_rx_buffer_pos = 0;
+
+#pragma RETAIN(target_tx_buffer_pos)
+volatile uint16_t pc_tx_buffer_pos = 0;
+
+#pragma RETAIN(target_rx_buffer_pos)
+volatile uint16_t pc_rx_buffer_pos = 0;
 
 void init_cs() {
     // Configure one FRAM waitstate as required by the device datasheet for MCLK
@@ -140,13 +192,70 @@ void init_rst_and_tst_pins()
     P8DIR |= (BIT4 | BIT5);
 }
 
+void activate_bsl()
+{
+    // to activate the BSL, the test pin needs two high clock edges
+    // they must last
+    P8OUT |= BIT5;
+    __delay_cycles(4000); // wait ~250 uS before setting the pin low, then high again.
+
+    // drop TST pin low for 250 uS.
+    P8OUT &= ~BIT5;
+    __delay_cycles(4000);
+
+    // raise TST pin high again
+    P8OUT |= ~BIT5;
+    __delay_cycles(2000); // only need 125 uS
+
+    // raise RST pin
+    P8OUT |= BIT4;
+    __delay_cycles(4000); // wait 250 uS
+
+    // lower TST pin and MCU should BSL should start
+    P8OUT &= ~BIT5;
+
+}
+
+void send_target_cmd(struct target_bsl_command_message* msg)
+{
+    // after this function exits, the user should be able to read the rx buffer to see the response
+    // goal is to build packet to send to target
+    // target has a header, length, command & data, and a checksum
+    while (target_tx_buffer_pos != 0); // wait for whatever's in there to be out before filling it
+    target_tx_buffer[0] = 0x80; // start with the UART header, which is always 0x80
+    target_tx_buffer[1] = (msg->data_length + 1) & 0xFF;
+    target_tx_buffer[2] = (msg->data_length + 1) >> 8;
+    target_tx_buffer[3] = msg->cmd & 0xFF;
+
+    CRCINIRES = 0xFFFF; // calculate the CRC 16 while we do this
+    // the CKL and CKH are calculated only from the command and associated data, not the header.
+    // this is not well documented, I discovered this by reading/running the python code posted
+    // at this thread here: https://e2e.ti.com/support/microcontrollers/msp-low-power-microcontrollers-group/msp430/f/msp-low-power-microcontroller-forum/437559/calculating-msp430-bsl-checksum
+    // Credit to Jason Gramse for his algorithm.
+    CRCDIRB = msg->cmd;
+    __no_operation();
+    uint16_t i = 0;
+    for (i = 0; i < msg->data_length; i++)
+    {
+        target_tx_buffer[i + 4] = msg->data[i];
+        CRCDIRB = msg->data[i];
+        __no_operation();
+    }
+
+    uint16_t crc16 = CRCINIRES;
+    target_tx_buffer[4+msg->data_length] = crc16 & 0xFF; // CKL
+    target_tx_buffer[5+msg->data_length] = crc16 >> 8; // CKH
+
+    target_tx_buffer_pos = 1;
+    UCA1TXBUF = target_tx_buffer[0]; // TODO update to go to target and not here.
+
+    while (target_tx_buffer_pos != 0);
+}
+
 void main(void) {
     WDTCTL = WDTPW | WDTHOLD;               // Stop watchdog timer
 
     init_cs(); // set clock system to 16 MHz
-
-    // init some globals
-    flashing_buffer_pos = 0;
 
     init_backchannel_uart(); // set up back channel UART
 
@@ -156,6 +265,11 @@ void main(void) {
 
     PM5CTL0 &= ~LOCKLPM5;                   // Disable the GPIO power-on default high-impedance mode
                                             // to activate previously configured port settings
+
+    uint8_t one_byte_array = 0;
+    struct target_bsl_command_message cmd = {0x15, 0, &one_byte_array};
+
+    send_target_cmd(&cmd);
 
     __bis_SR_register(LPM3_bits | GIE);       // Enter LPM3, interrupts enabled
     __no_operation();
@@ -176,11 +290,26 @@ void __attribute__ ((interrupt(USCI_A1_VECTOR))) USCI_A1_ISR (void)
   {
     case USCI_NONE: break;
     case USCI_UART_UCRXIFG:
-      while(!(UCA1IFG&UCTXIFG)); // wait until TX Buffer is ready to accept a new character
-      UCA1TXBUF = UCA1RXBUF + 1;
-      P1OUT ^= BIT0;
+      if (target_rx_buffer_pos == target_rx_buffer_len)
+      {
+          P1OUT &= ~BIT0;
+      } else {
+          P1OUT |= BIT0;
+          target_rx_buffer[target_rx_buffer_pos] = UCA1RXBUF;
+          target_rx_buffer_pos += 1;
+      }
       break;
-    case USCI_UART_UCTXIFG: break;
+    case USCI_UART_UCTXIFG:
+      if (target_tx_buffer_pos == target_tx_buffer_len)
+      {
+          P9OUT &= ~BIT7; // transmitting complete, turn the LED off
+          target_tx_buffer_pos = 0;
+      } else {
+          P9OUT |= BIT7; // transmitting ongoing, turn LED on
+          UCA1TXBUF = target_tx_buffer[target_tx_buffer_pos];
+          target_tx_buffer_pos += 1;
+      }
+      break;
     case USCI_UART_UCSTTIFG: break;
     case USCI_UART_UCTXCPTIFG: break;
   }
