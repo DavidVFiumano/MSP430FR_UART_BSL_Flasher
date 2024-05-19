@@ -63,40 +63,22 @@ struct target_bsl_command_message {
 //#pragma RETAIN(pc_command_buffer)
 struct PC_Command pc_command_buffer;
 
-#pragma RETAIN(target_tx_buffer)
 volatile uint8_t target_tx_buffer[8192] = {0};
-
-#pragma RETAIN(target_rx_buffer)
 volatile uint8_t target_rx_buffer[256] = {0};
 
-#pragma RETAIN(pc_tx_buffer)
 volatile uint8_t pc_tx_buffer[256] = {0};
-
-#pragma RETAIN(pc_rx_buffer)
 volatile uint8_t pc_rx_buffer[8192] = {0};
 
-#pragma RETAIN(target_tx_buffer_pos)
 volatile uint16_t target_tx_buffer_pos = 0;
-
-#pragma RETAIN(target_tx_buffer_len)
-volatile uint16_t target_tx_buffer_len = 0;
-
-#pragma RETAIN(target_tx_buffer_len)
-volatile uint16_t target_rx_buffer_len = 0;
-
-#pragma RETAIN(target_tx_buffer_len)
-volatile uint16_t pc_tx_buffer_len = 0;
-
-#pragma RETAIN(target_tx_buffer_len)
-volatile uint16_t pc_rx_buffer_len = 0;
-
-#pragma RETAIN(target_rx_buffer_pos)
 volatile uint16_t target_rx_buffer_pos = 0;
 
-#pragma RETAIN(target_tx_buffer_pos)
-volatile uint16_t pc_tx_buffer_pos = 0;
+volatile uint16_t target_tx_buffer_len = 0;
+volatile uint16_t target_rx_buffer_len = 0;
 
-#pragma RETAIN(target_rx_buffer_pos)
+volatile uint16_t pc_tx_buffer_len = 0;
+volatile uint16_t pc_rx_buffer_len = 0;
+
+volatile uint16_t pc_tx_buffer_pos = 0;
 volatile uint16_t pc_rx_buffer_pos = 0;
 
 void init_cs() {
@@ -141,6 +123,7 @@ void init_backchannel_uart()
 
     // init eUSCI_A1
     UCA1CTLW0 = UCSWRST; // RESET eUSCIA1 so that we can set registers
+    UCA1IFG = 0;
     UCA1CTLW0 |= UCSSEL__SMCLK; // Set this to use the SMCLK as it's source
     // Per table 30-5 in the user's guide
     UCA1BRW = 104; // table 30-5, USCA1BRW
@@ -247,6 +230,7 @@ void send_target_cmd(struct target_bsl_command_message* msg)
     target_tx_buffer[5+msg->data_length] = crc16 >> 8; // CKH
 
     target_tx_buffer_pos = 1;
+    target_tx_buffer_len = 4 + msg->data_length;
     UCA1TXBUF = target_tx_buffer[0]; // TODO update to go to target and not here.
 
     while (target_tx_buffer_pos != 0);
@@ -261,13 +245,18 @@ void main(void) {
 
     init_led_pins(); // setup Tx/Rx pins
 
-    init_rst_and_tst_pins(); // setup pins connected to target RST/TST
+    //init_rst_and_tst_pins(); // setup pins connected to target RST/TST
 
     PM5CTL0 &= ~LOCKLPM5;                   // Disable the GPIO power-on default high-impedance mode
                                             // to activate previously configured port settings
 
     uint8_t one_byte_array = 0;
     struct target_bsl_command_message cmd = {0x15, 0, &one_byte_array};
+
+    target_tx_buffer_len = 0;
+    target_tx_buffer_pos = 0; // TODO init others.
+
+    __bis_SR_register(GIE);
 
     send_target_cmd(&cmd);
 
@@ -304,6 +293,7 @@ void __attribute__ ((interrupt(USCI_A1_VECTOR))) USCI_A1_ISR (void)
       {
           P9OUT &= ~BIT7; // transmitting complete, turn the LED off
           target_tx_buffer_pos = 0;
+          target_tx_buffer_len = 0;
       } else {
           P9OUT |= BIT7; // transmitting ongoing, turn LED on
           UCA1TXBUF = target_tx_buffer[target_tx_buffer_pos];
