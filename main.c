@@ -249,8 +249,8 @@ void main(void) {
     PM5CTL0 &= ~LOCKLPM5;                   // Disable the GPIO power-on default high-impedance mode
                                             // to activate previously configured port settings
 
-    uint8_t one_byte_array = 0;
-    struct target_bsl_command_message cmd = {0x15, 0, &one_byte_array};
+    uint8_t one_byte_array[1] = {0x06};
+    struct target_bsl_command_message cmd = {0x52, 0x1, &one_byte_array[0]};
 
     target_tx_buffer_len = 0;
     target_tx_buffer_pos = 0; // TODO init others.
