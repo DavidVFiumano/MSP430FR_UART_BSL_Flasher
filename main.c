@@ -26,6 +26,27 @@
 
 #include <stdint.h>
 
+enum COMMAND {
+    NO_OP = 0x0,
+    CLEAR_TARGET = 0x1,
+    WRITE_DATA = 0x2
+};
+
+struct PC_Command {
+    COMMAND command_type;
+    int16_t length; // command length
+    uint32_t crc32; // CRC32 of command, including this header and underlying data
+};
+
+//#pragma RETAIN(pc_command_buffer)
+PC_Command pc_command_buffer;
+
+#pragma RETAIN(flashing_buffer)
+volatile uint8_t flashing_buffer[32768] = {0};
+
+#pragma RETAIN(flashing_buffer_pos)
+volatile uint32_t flashing_buffer_pos = 0;
+
 void init_cs() {
     // Configure one FRAM waitstate as required by the device datasheet for MCLK
     // operation beyond 8MHz _before_ configuring the clock system.
@@ -123,6 +144,9 @@ void main(void) {
     WDTCTL = WDTPW | WDTHOLD;               // Stop watchdog timer
 
     init_cs(); // set clock system to 16 MHz
+
+    // init some globals
+    flashing_buffer_pos = 0;
 
     init_backchannel_uart(); // set up back channel UART
 
